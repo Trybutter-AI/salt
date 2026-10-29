@@ -11,9 +11,9 @@ jobs:
     name: Typecheck, build and schema integrity
     runs-on: ubuntu-latest
 
-    # `ensureSchema` only fails in the ways that matter against a real
-    # Postgres — a NOT NULL column, a CHECK constraint, a DO block. There is
-    # nothing useful to assert without one.
+    # The migrations only fail in the ways that matter against a real
+    # Postgres — a NOT NULL column, a CHECK constraint, a foreign key. There
+    # is nothing useful to assert without one.
     services:
       postgres:
         image: postgres:16-alpine
@@ -32,9 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 22 rather than the newest: `package.json` pins `<23`, and the schema
-      # tests are run as TypeScript by Node's own type stripping, which 20
-      # does not have.
+      # 22 rather than the newest: `package.json` pins `<23`, and the suite
+      # imports TypeScript through Node's own type stripping, which 20 does
+      # not have.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -45,18 +45,15 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Runs `scripts/migrate.mjs` the way the deploy does, then checks the
+      # app still reads — and that no DDL has crept back into the request
+      # path, which is what made a schema mistake a public 500 last time.
       - name: Schema integrity
         run: npm test
         env:
-          # Almost every statement in the migration is an IF NOT EXISTS, and
-          # Postgres raises a NOTICE for each one it skips — some 1,600 lines
-          # a run, which buries the failure this job exists to show.
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/salt_test?options=-c%20client_min_messages%3Dwarning
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/salt_test
 
       - name: Build
         run: npm run build
         env:
-          # The build renders pages that read listings. Without a database the
-          # client is null and those reads return empty, which is the path we
-          # want here: the schema itself is covered by the step above.
           NEXT_TELEMETRY_DISABLED: "1"

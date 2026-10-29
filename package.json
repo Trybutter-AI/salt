@@ -9,6 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "migrate": "node scripts/migrate.mjs",
     "test": "node --experimental-strip-types --test --test-concurrency=1 \"test/**/*.test.mjs\""
   },
   "dependencies": {
