@@ -296,7 +296,15 @@ export function ensureSchema(): Promise<void> {
 
     /* Backfill: one personal org per provider that has no membership yet.
        A loop rather than a single INSERT..SELECT because the new org id has
-       to be paired back to the provider it was created for. */
+       to be paired back to the provider it was created for.
+
+       The name falls back to the provider id because `providers.email` is
+       nullable and `organizations.name` is not: the seller app signs
+       collectors in by phone number alone, and Apple withholds the address
+       often enough that those accounts are real too. Naming the org after
+       the email local part alone made the insert fail for every one of
+       them, and since this runs on read it took the marketplace down with
+       it rather than just skipping the row. */
     await sql`
       DO $$
       DECLARE
@@ -310,7 +318,9 @@ export function ensureSchema(): Promise<void> {
           WHERE m.id IS NULL
         LOOP
           INSERT INTO organizations (name)
-          VALUES (split_part(p.email, '@', 1))
+          VALUES (
+            COALESCE(NULLIF(split_part(p.email, '@', 1), ''), 'provider-' || p.id)
+          )
           RETURNING id INTO new_org;
 
           INSERT INTO organization_members (org_id, provider_id, role)
