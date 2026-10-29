@@ -9,7 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --experimental-strip-types --test --test-concurrency=1 test/"
+    "test": "node --experimental-strip-types --test --test-concurrency=1 \"test/**/*.test.mjs\""
   },
   "dependencies": {
     "next": "16.2.6",
