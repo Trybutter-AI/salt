@@ -1,24 +1,29 @@
 /**
  * Schema integrity.
  *
- * `ensureSchema()` is not ordinary startup code: the marketplace index calls
- * it on every render, so anything it rejects is a 500 on the buyer-facing
- * page rather than a failed deploy. It also runs against a database this repo
- * shares with the seller app, which owns most of these tables and changes
- * them on its own schedule. That combination has already taken production
- * down once — the seller app made `providers.email` nullable for phone
- * sign-in, and the personal-org backfill named each org after the email local
- * part into a NOT NULL column.
+ * The schema used to be applied by an `ensureSchema()` that every request
+ * awaited. That put DDL on a buyer-facing page load, let two instances race
+ * each other over the same backfill, and turned a statement the database
+ * rejected into a 500 on the marketplace index instead of a failed deploy.
+ * It is now `scripts/migrate.mjs`, run once as Railway's pre-deploy command.
  *
- * So these tests do not check that the migration is *correct*. They check
- * that it still runs, and still leaves the index's query working, against a
- * database holding the kinds of rows the seller app actually writes.
+ * So these tests cover the two halves of that: the migrations apply cleanly
+ * and repeatably, and the app no longer carries any DDL to run at all.
  *
  * Requires a throwaway Postgres in `DATABASE_URL`. Every test drops and
  * recreates the public schema, so the name has to look like a test database.
  */
 import assert from "node:assert/strict";
-import { beforeEach, test } from "node:test";
+import { execFile } from "node:child_process";
+import { readdir, readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { after, beforeEach, test } from "node:test";
+import postgres from "postgres";
+
+const execFileAsync = promisify(execFile);
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const url = process.env.DATABASE_URL;
 if (!url) {
@@ -39,112 +44,145 @@ if (!/test/i.test(databaseName)) {
   );
 }
 
-/* Imported after the guard so nothing connects to a database we just refused,
-   and as `.ts` because Node strips the types directly — the app has no build
-   step for anything outside Next. */
-const { ensureSchema, sql } = await import("../lib/db.ts");
+const sql = postgres(url, {
+  max: 1,
+  ssl: /localhost|127\.0\.0\.1/.test(url) ? false : "require",
+  onnotice: () => {},
+});
 
-/** The migration caches its own promise, so a re-run needs the cache cleared. */
-async function runEnsureSchema() {
-  globalThis.__butterSchemaReady = null;
-  await ensureSchema();
+/** Runs the real migration script, the way the deploy does. */
+async function migrate() {
+  return execFileAsync("node", [path.join(ROOT, "scripts", "migrate.mjs")], {
+    env: { ...process.env, DATABASE_URL: url },
+  });
+}
+
+/** The tables the seller app owns and this app only reads. */
+async function createExternalTables() {
+  const fixture = await readFile(path.join(ROOT, "test", "fixtures", "external-tables.sql"), "utf8");
+  await sql.unsafe(fixture);
 }
 
 beforeEach(async () => {
   await sql.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
-  globalThis.__butterSchemaReady = null;
+});
+
+/* Without this the pooled connection keeps the event loop alive and the
+   runner hangs after the last assertion instead of exiting. */
+after(async () => {
+  await sql.end();
+});
+
+test("applies to an empty database", async () => {
+  await migrate();
+
+  const tables = (
+    await sql`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' ORDER BY table_name
+    `
+  ).map((r) => r.table_name);
+
+  assert.deepEqual(tables, [
+    "buyer_interest",
+    "buyer_sessions",
+    "buyers",
+    "schema_migrations",
+  ]);
 });
 
 /**
- * What the seller app has done to the tables it shares with us. Kept as a
- * list of statements rather than a copy of its migration because the point is
- * the *shape* we have to tolerate, not its exact history: columns we never
- * declared, and constraints it has relaxed from under us.
+ * The point of a migration step over the old boot-time DDL: each file is
+ * applied once and recorded, so a second deploy is a no-op rather than a
+ * re-run of every statement against the live database.
  */
-async function applySellerAppDrift() {
-  await sql.unsafe(`
-    ALTER TABLE providers ALTER COLUMN email DROP NOT NULL;
-    ALTER TABLE providers ADD COLUMN IF NOT EXISTS phone TEXT;
-    ALTER TABLE providers ADD COLUMN IF NOT EXISTS apple_id TEXT;
-    ALTER TABLE providers ADD COLUMN IF NOT EXISTS legal_name TEXT;
-  `);
-}
+test("applies each migration exactly once", async () => {
+  await migrate();
+  const first = await sql`SELECT name, applied_at FROM schema_migrations ORDER BY name`;
 
-test("runs against an empty database", async () => {
-  await runEnsureSchema();
+  const { stdout } = await migrate();
+  const second = await sql`SELECT name, applied_at FROM schema_migrations ORDER BY name`;
 
-  const [{ count }] = await sql`
-    SELECT count(*)::int AS count FROM information_schema.tables
-    WHERE table_schema = 'public' AND table_name IN ('providers', 'listings', 'organizations')
-  `;
-  assert.equal(count, 3, "expected the core tables to exist after the migration");
-});
+  assert.match(stdout, /nothing to do/);
+  assert.deepEqual(
+    second.map((r) => r.applied_at.toISOString()),
+    first.map((r) => r.applied_at.toISOString()),
+    "a second run should not have re-applied anything"
+  );
 
-test("runs twice without drifting", async () => {
-  await runEnsureSchema();
-  await runEnsureSchema();
+  const files = (await readdir(path.join(ROOT, "migrations"))).filter((f) => f.endsWith(".sql"));
+  assert.equal(first.length, files.length, "every migration file should be recorded");
 });
 
 /**
- * The regression that took the index down. Each of these is an account the
- * seller app creates with no email address at all: `findOrCreateProviderByPhone`
- * writes a number and nothing else, and Sign in with Apple does the same
- * whenever Apple declines to vouch for an address. Neither writes an
- * `organization_members` row, which is exactly what the backfill looks for.
+ * Production already has these tables — they were created by the old
+ * `ensureSchema()` long before `schema_migrations` existed. The first real
+ * run of this script happens against that database, not an empty one.
  */
-test("runs with providers the seller app created without an email", async () => {
-  await runEnsureSchema();
-  await applySellerAppDrift();
+test("applies to a database that already has the tables", async () => {
+  const dir = path.join(ROOT, "migrations");
+  for (const file of (await readdir(dir)).filter((f) => f.endsWith(".sql")).sort()) {
+    await sql.unsafe(await readFile(path.join(dir, file), "utf8"));
+  }
 
-  await sql`INSERT INTO providers (phone, provider_type) VALUES ('+15555550100', 'individual')`;
-  await sql`INSERT INTO providers (apple_id, provider_type) VALUES ('apple-000', 'individual')`;
-  await sql`INSERT INTO providers (email, provider_type) VALUES ('zoe@trybutter.ai', 'individual')`;
+  await migrate();
 
-  await runEnsureSchema();
-});
-
-test("gives every provider exactly one organization with a usable name", async () => {
-  await runEnsureSchema();
-  await applySellerAppDrift();
-
-  await sql`INSERT INTO providers (phone, provider_type) VALUES ('+15555550100', 'individual')`;
-  await sql`INSERT INTO providers (apple_id, provider_type) VALUES ('apple-000', 'individual')`;
-  await sql`INSERT INTO providers (email, provider_type) VALUES ('zoe@trybutter.ai', 'individual')`;
-  /* An empty string is not NULL, so it slips past a plain NOT NULL check and
-     would leave an org labelled with nothing at all in the seller portal. */
-  await sql`INSERT INTO providers (email, provider_type) VALUES ('', 'individual')`;
-
-  await runEnsureSchema();
-
-  const orphaned = await sql`
-    SELECT pr.id FROM providers pr
-    LEFT JOIN organization_members m ON m.provider_id = pr.id
-    WHERE m.id IS NULL
-  `;
-  assert.equal(orphaned.length, 0, "every provider should have been given an organization");
-
-  const unnamed = await sql`
-    SELECT o.id, o.name FROM organizations o WHERE o.name IS NULL OR btrim(o.name) = ''
-  `;
-  assert.equal(unnamed.length, 0, "every organization should have a non-empty name");
-
-  const [{ named }] = await sql`
-    SELECT count(*)::int AS named FROM organizations WHERE name = 'zoe'
-  `;
-  assert.equal(named, 1, "a provider with an email should still be named after it");
+  const [{ count }] = await sql`SELECT count(*)::int AS count FROM schema_migrations`;
+  assert.ok(count > 0, "migrations should have been recorded against the existing schema");
 });
 
 /**
- * The migration succeeding is only half of it — the index still has to be able
- * to read. This is the query `getApprovedListings` issues, and it is written
- * out rather than imported because `lib/listings.ts` pulls in `server-only`,
- * which Next resolves through its bundler and plain Node cannot load.
+ * The regression guard for the outage itself. Nothing the app imports at
+ * request time may carry DDL: if it does, it runs on somebody's page load
+ * again, and the next schema mistake is a 500 rather than a red deploy.
  */
-test("leaves the marketplace index query runnable", async () => {
-  await runEnsureSchema();
-  await applySellerAppDrift();
+test("the app carries no DDL", async () => {
+  const offenders = [];
 
-  const rows = await sql`
+  async function walk(dir) {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (!/\.tsx?$/.test(entry.name)) continue;
+
+      const source = await readFile(full, "utf8");
+      /* Comments discuss the DDL that used to be here, so they are stripped
+         before looking. Only whole-line `//` is removed, to avoid cutting a
+         line short at the `//` inside a URL. */
+      const code = source
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+
+      const match = code.match(/\b(CREATE|ALTER|DROP)\s+(TABLE|INDEX|CONSTRAINT|COLUMN|SCHEMA)\b/i);
+      if (match) offenders.push(`${path.relative(ROOT, full)}: ${match[0]}`);
+    }
+  }
+
+  await walk(path.join(ROOT, "lib"));
+  await walk(path.join(ROOT, "app"));
+
+  assert.deepEqual(
+    offenders,
+    [],
+    "DDL belongs in migrations/, not in code the request path imports"
+  );
+});
+
+/**
+ * The migration succeeding is only half of it — the pages still have to be
+ * able to read. These are the queries the app issues, written out rather than
+ * imported because `lib/listings.ts` and `lib/buyer-auth.ts` pull in
+ * `server-only`, which Next resolves through its bundler and plain Node
+ * cannot load.
+ */
+test("leaves the app's own queries runnable", async () => {
+  await migrate();
+  await createExternalTables();
+
+  const listings = await sql`
     SELECT
       id, title, category, summary,
       asking_price_cents AS "askingPriceCents",
@@ -154,5 +192,48 @@ test("leaves the marketplace index query runnable", async () => {
     WHERE status = 'approved'
     ORDER BY created_at DESC
   `;
-  assert.ok(Array.isArray(rows));
+  assert.ok(Array.isArray(listings));
+
+  const session = await sql`
+    SELECT b.id AS "buyerId", b.email, b.name, b.company_name AS "companyName", b.status
+    FROM buyer_sessions s
+    JOIN buyers b ON b.id = s.buyer_id
+    WHERE s.token_hash = ${"nonexistent"} AND s.expires_at > now()
+    LIMIT 1
+  `;
+  assert.equal(session.length, 0);
+
+  const provider = await sql`
+    SELECT p.id AS "providerId", p.email
+    FROM provider_sessions s
+    JOIN providers p ON p.id = s.provider_id
+    WHERE s.token_hash = ${"nonexistent"} AND s.expires_at > now()
+    LIMIT 1
+  `;
+  assert.equal(provider.length, 0);
+});
+
+/**
+ * A buyer signing up has to survive the seller app's accounts existing
+ * alongside, including the email-less ones that broke the old backfill.
+ */
+test("accepts a buyer signup alongside email-less provider accounts", async () => {
+  await migrate();
+  await createExternalTables();
+
+  await sql`INSERT INTO providers (phone, provider_type) VALUES ('+15555550100', 'individual')`;
+  await sql`INSERT INTO providers (apple_id, provider_type) VALUES ('apple-000', 'individual')`;
+
+  const [interest] = await sql`
+    INSERT INTO buyer_interest (name, email, use_case)
+    VALUES ('Zoe', 'zoe@trybutter.ai', 'evaluating')
+    RETURNING id
+  `;
+  await sql`
+    INSERT INTO buyers (email, password_hash, name, interest_id)
+    VALUES ('zoe@trybutter.ai', 'hash', 'Zoe', ${interest.id})
+  `;
+
+  const [{ count }] = await sql`SELECT count(*)::int AS count FROM buyers`;
+  assert.equal(count, 1);
 });
