@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    name: Typecheck, build and schema integrity
+    runs-on: ubuntu-latest
+
+    # `ensureSchema` only fails in the ways that matter against a real
+    # Postgres — a NOT NULL column, a CHECK constraint, a DO block. There is
+    # nothing useful to assert without one.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: salt_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 22 rather than the newest: `package.json` pins `<23`, and the schema
+      # tests are run as TypeScript by Node's own type stripping, which 20
+      # does not have.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Schema integrity
+        run: npm test
+        env:
+          # Almost every statement in the migration is an IF NOT EXISTS, and
+          # Postgres raises a NOTICE for each one it skips — some 1,600 lines
+          # a run, which buries the failure this job exists to show.
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/salt_test?options=-c%20client_min_messages%3Dwarning
+
+      - name: Build
+        run: npm run build
+        env:
+          # The build renders pages that read listings. Without a database the
+          # client is null and those reads return empty, which is the path we
+          # want here: the schema itself is covered by the step above.
+          NEXT_TELEMETRY_DISABLED: "1"
