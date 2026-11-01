@@ -5,6 +5,10 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Retargeting a pull request fires `edited`, which is not one of the
+  # default `pull_request` types, so a PR moved onto main never gets a run
+  # until something is pushed to it. This is the way to ask for one.
+  workflow_dispatch:
 
 jobs:
   check:
