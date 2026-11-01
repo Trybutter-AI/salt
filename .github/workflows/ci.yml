@@ -36,12 +36,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 22 rather than the newest: `package.json` pins `<23`, and the suite
-      # imports TypeScript through Node's own type stripping, which 20 does
-      # not have.
+      # The low end of the range `package.json` allows (>=20.18 <23). On 22
+      # the Turbopack build fails resolving the `next/font/google` loader —
+      # 28 copies of "Can't resolve '@vercel/turbopack-next/internal/font/
+      # google/font'" — which has nothing to do with this repo's code and
+      # does not happen on 20. Railway builds the deployed site on its own
+      # Node, so this pin only governs CI.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
           cache: npm
 
       - run: npm ci
