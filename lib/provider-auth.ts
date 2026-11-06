@@ -1,7 +1,7 @@
 import "server-only";
 import { cache } from "react";
 import { cookies } from "next/headers";
-import { ensureSchema, sql } from "./db";
+import { sql } from "./db";
 import { hashToken } from "./auth/tokens";
 import { PROVIDER_COOKIE } from "./auth/cookies";
 
@@ -24,8 +24,6 @@ export const verifyProviderSession = cache(async (): Promise<ProviderSession | n
   const cookieStore = await cookies();
   const token = cookieStore.get(PROVIDER_COOKIE)?.value;
   if (!token) return null;
-
-  await ensureSchema();
 
   const rows = await sql<{ providerId: number; email: string }[]>`
     SELECT p.id AS "providerId", p.email

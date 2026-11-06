@@ -1,5 +1,5 @@
 import "server-only";
-import { ensureSchema, sql } from "./db";
+import { sql } from "./db";
 import { normalizeCategory, signalPrimitive } from "./taxonomy";
 
 /**
@@ -134,7 +134,6 @@ export function normalizeParameters(raw: ListingParameters & LegacyParameters): 
 
 export async function getApprovedListings(): Promise<Listing[]> {
   if (!sql) return [];
-  await ensureSchema();
 
   const rows = await sql<Listing[]>`
     SELECT

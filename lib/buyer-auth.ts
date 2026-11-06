@@ -1,7 +1,7 @@
 import "server-only";
 import { cache } from "react";
 import { cookies } from "next/headers";
-import { ensureSchema, sql } from "./db";
+import { sql } from "./db";
 import { generateSessionToken, hashToken } from "./auth/tokens";
 import { BUYER_COOKIE } from "./auth/cookies";
 import type { BuyerType } from "./auth/kyb";
@@ -39,8 +39,6 @@ export const verifyBuyerSession = cache(async (): Promise<BuyerSession | null> =
   const token = cookieStore.get(BUYER_COOKIE)?.value;
   if (!token) return null;
 
-  await ensureSchema();
-
   const rows = await sql<BuyerSession[]>`
     SELECT b.id AS "buyerId", b.email, b.name, b.company_name AS "companyName", b.status
     FROM buyer_sessions s
@@ -54,7 +52,6 @@ export const verifyBuyerSession = cache(async (): Promise<BuyerSession | null> =
 
 export async function findBuyerByEmail(email: string): Promise<BuyerRecord | null> {
   if (!sql) return null;
-  await ensureSchema();
 
   const rows = await sql<BuyerRecord[]>`
     SELECT id AS "buyerId", email, name, company_name AS "companyName",
@@ -95,7 +92,6 @@ export async function endBuyerSession(): Promise<void> {
   const token = cookieStore.get(BUYER_COOKIE)?.value;
 
   if (token && sql) {
-    await ensureSchema();
     await sql`DELETE FROM buyer_sessions WHERE token_hash = ${hashToken(token)}`;
   }
   cookieStore.delete(BUYER_COOKIE);

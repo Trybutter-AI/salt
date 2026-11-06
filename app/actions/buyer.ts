@@ -1,6 +1,6 @@
 "use server";
 
-import { ensureSchema, sql } from "../../lib/db";
+import { sql } from "../../lib/db";
 import { emailDomain, isWorkEmail } from "../../lib/auth/kyb";
 import { hashPassword } from "../../lib/auth/passwords";
 import { passwordProblem } from "../../lib/auth/password-rules";
@@ -50,8 +50,6 @@ export async function submitBuyerInterest(
   if (!sql) {
     return { status: "error", message: "Submission is unavailable right now." };
   }
-
-  await ensureSchema();
 
   const passwordHash = await hashPassword(password);
 
