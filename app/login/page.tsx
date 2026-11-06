@@ -14,23 +14,30 @@ export const metadata: Metadata = {
 };
 
 /**
- * Buyer sign-in: email + password only. No Google — buyers arrive through a
- * reviewed access request rather than self-serve social sign-up, so there is
- * nothing for an OAuth provider to shortcut.
+ * Buyer sign-in: a user id or a work email, plus a password. No Google —
+ * buyers arrive through a reviewed access request rather than self-serve
+ * social sign-up, so there is nothing for an OAuth provider to shortcut.
  */
-export default async function MarketplaceLoginPage() {
-  if (await verifyBuyerSession()) redirect("/");
+export default async function MarketplaceLoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ next?: string }>;
+}) {
+  const { next } = await searchParams;
+  const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/portal";
+
+  if (await verifyBuyerSession()) redirect(safeNext);
 
   return (
     <main className="formSection">
       <div className="formEyebrow">Embodied Data Marketplace</div>
       <h1 className="formH1">Buyer log in.</h1>
       <p className="formIntro">
-        Sign in to see pricing, sample episodes, and licensing terms across every
-        listing. Accounts go live once we&apos;ve reviewed your access request.
+        Sign in for the footage collected against your assignments, and for
+        pricing and licensing terms across every listing.
       </p>
 
-      <BuyerLoginForm />
+      <BuyerLoginForm next={safeNext} />
 
       <p className="formSwitch">
         Don&apos;t have an account yet?{" "}

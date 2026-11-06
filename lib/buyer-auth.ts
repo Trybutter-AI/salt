@@ -12,7 +12,11 @@ export type BuyerStatus = "pending" | "approved" | "rejected" | "suspended";
 
 export type BuyerSession = {
   buyerId: number;
-  email: string;
+  /* Null on an account that signs in with a user id instead. A lab's account
+     is held by whoever is on the data team that week, so the id is handed
+     over with the role and there is no one person's address behind it. */
+  email: string | null;
+  username: string | null;
   name: string;
   /* Null until it is derived from the work email domain — signup no longer
      asks for either of these. */
@@ -21,7 +25,10 @@ export type BuyerSession = {
 };
 
 export type BuyerRecord = BuyerSession & {
-  passwordHash: string;
+  /* Null on a company row the seller app created that has never been given a
+     login. `verifyPassword` refuses a null, so such a row cannot be signed
+     in to — it is a buyer Butter sells to, not yet an account. */
+  passwordHash: string | null;
   buyerType: BuyerType | null;
 };
 
@@ -39,28 +46,45 @@ export const verifyBuyerSession = cache(async (): Promise<BuyerSession | null> =
   const token = cookieStore.get(BUYER_COOKIE)?.value;
   if (!token) return null;
 
-  const rows = await sql<BuyerSession[]>`
-    SELECT b.id AS "buyerId", b.email, b.name, b.company_name AS "companyName", b.status
+  const rows = await sql<(Omit<BuyerSession, "buyerId"> & { buyerId: string })[]>`
+    SELECT b.id AS "buyerId", b.email, b.username, b.name,
+           b.company_name AS "companyName", b.status
     FROM buyer_sessions s
     JOIN buyers b ON b.id = s.buyer_id
     WHERE s.token_hash = ${hashToken(token)} AND s.expires_at > now()
     LIMIT 1
   `;
 
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row ? { ...row, buyerId: Number(row.buyerId) } : null;
 });
 
-export async function findBuyerByEmail(email: string): Promise<BuyerRecord | null> {
+/**
+ * The account behind what was typed in the one sign-in field, which is either
+ * a user id or an email. Both are matched case-insensitively and both have a
+ * unique index on `lower(...)`, so this can return at most one row either way.
+ *
+ * One field rather than two, because asking which kind of credential someone
+ * holds is a question they should not have to answer about their own login.
+ */
+export async function findBuyerByLogin(identifier: string): Promise<BuyerRecord | null> {
   if (!sql) return null;
 
-  const rows = await sql<BuyerRecord[]>`
-    SELECT id AS "buyerId", email, name, company_name AS "companyName",
+  const typed = identifier.trim().toLowerCase();
+  if (!typed) return null;
+
+  /* `id` is a BIGINT, which this driver hands back as a string. The type says
+     number and callers do arithmetic on it, so it is converted here rather
+     than left to whichever caller notices. */
+  const rows = await sql<(Omit<BuyerRecord, "buyerId"> & { buyerId: string })[]>`
+    SELECT id AS "buyerId", email, username, name, company_name AS "companyName",
            status, password_hash AS "passwordHash", buyer_type AS "buyerType"
     FROM buyers
-    WHERE lower(email) = ${email.toLowerCase()}
+    WHERE lower(email) = ${typed} OR lower(username) = ${typed}
     LIMIT 1
   `;
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row ? { ...row, buyerId: Number(row.buyerId) } : null;
 }
 
 /** Mints a session row and sets the cookie. Caller must have authenticated. */

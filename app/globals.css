@@ -8961,3 +8961,142 @@ body[data-wb-rail="collapsed"] .workbench {
     padding-top: 2.5rem;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   Buyer portal — the footage collected against a buyer's assignments
+
+   Built on the workbench vocabulary above (.wbSection, .wbPanel,
+   .wbTable, .wbDetailRow, .statTile), which this app already carries,
+   so the portal reads as the same product as the seller's side. Only
+   what the workbench has no equivalent for is defined here: the video
+   players, and the two status words.
+   ══════════════════════════════════════════════════════════════════ */
+
+.portalRowLink {
+  color: inherit;
+  font-weight: 700;
+  text-decoration: none;
+  border-bottom: var(--rule) solid var(--line-strong);
+}
+.portalRowLink:hover {
+  border-bottom-color: var(--blue);
+}
+
+.portalRowMeta {
+  font-size: 0.8rem;
+  opacity: 0.6;
+  margin-top: 0.2rem;
+}
+
+/* The assignment table runs to the panel's edges, so it keeps the one
+   shared gutter rather than sitting in a box inside a box. */
+.portalAssignments {
+  padding: 1.75rem 0 0;
+}
+.portalAssignments .wbTable th:first-child,
+.portalAssignments .wbTable td:first-child {
+  padding-left: 1.75rem;
+}
+.portalAssignments .wbTable th:last-child,
+.portalAssignments .wbTable td:last-child {
+  padding-right: 1.75rem;
+}
+
+.portalStatus {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 0.2rem 0.45rem;
+}
+.portalStatus-open {
+  background: var(--butter-green-soft);
+  color: var(--butter-green-dark);
+}
+.portalStatus-closed {
+  background: var(--line-soft);
+  opacity: 0.8;
+}
+
+/* Site and assignment side by side: one band, one vertical rule. */
+.portalSplit {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.75rem;
+}
+
+.portalFootageH2 {
+  margin-top: 2.5rem;
+  margin-bottom: 1rem;
+}
+
+.portalEpisodeTop {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+.portalEpisodeId {
+  margin: 0;
+}
+.portalEpisodeMeta {
+  font-size: 0.82rem;
+  opacity: 0.7;
+}
+
+.portalConsent {
+  font-weight: 700;
+}
+.portalConsent-complete {
+  color: var(--butter-green-dark);
+}
+.portalConsent-blocked {
+  color: var(--butter-red-dark);
+}
+
+/* Columns are capped rather than fluid: one video should not stretch across
+   the whole band, and two should sit side by side at the size one gets. */
+.portalPlayers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 440px));
+  gap: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+.portalPlayerFig {
+  margin: 0;
+}
+
+/* Indigo behind the frame, so a video that has not drawn yet and the
+   letterboxing around one that has read as deliberate. */
+.portalVideo {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: var(--butter-ink-dark);
+  border: var(--rule) solid var(--line);
+}
+.portalAudio {
+  display: block;
+  width: 100%;
+}
+
+.portalFiles {
+  margin-top: 0.5rem;
+}
+
+@media (max-width: 720px) {
+  .portalAssignments {
+    padding: 1.25rem 0 0;
+  }
+  .portalAssignments .wbTable th:first-child,
+  .portalAssignments .wbTable td:first-child {
+    padding-left: 1.25rem;
+  }
+  .portalAssignments .wbTable th:last-child,
+  .portalAssignments .wbTable td:last-child {
+    padding-right: 1.25rem;
+  }
+}
