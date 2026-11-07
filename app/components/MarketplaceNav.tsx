@@ -27,7 +27,13 @@ export default async function MarketplaceNav() {
       </a>
       {buyer ? (
         <>
-          <span className="marketNavAccount" title={buyer.email}>
+          {/* The buyer's own footage, which is the reason most of them sign
+              in at all — so it sits in the header rather than behind the
+              account name. */}
+          <Link href="/portal" className="marketNavSellLink">
+            Assignments
+          </Link>
+          <span className="marketNavAccount" title={buyer.email ?? buyer.username ?? undefined}>
             {buyer.name}
           </span>
           <form action={logOutBuyer}>

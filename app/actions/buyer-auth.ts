@@ -7,7 +7,7 @@ import { sql } from "../../lib/db";
 import { hashPassword, verifyPassword } from "../../lib/auth/passwords";
 import {
   endBuyerSession,
-  findBuyerByEmail,
+  findBuyerByLogin,
   startBuyerSession,
   type BuyerStatus,
 } from "../../lib/buyer-auth";
@@ -15,15 +15,27 @@ import { emailDomain } from "../../lib/auth/kyb";
 import { captureServerEvent } from "../../lib/posthog-server";
 
 /**
- * A hash of a random string, verified against when the email matches no
- * account. Without it, an unknown email answers in a fraction of the time a
+ * A hash of a random string, verified against when what was typed matches no
+ * account. Without it, an unknown login answers in a fraction of the time a
  * known one takes — which would hand back the account-existence answer the
  * shared error message is there to withhold.
  */
-let unknownEmailHash: Promise<string> | null = null;
+let unknownLoginHash: Promise<string> | null = null;
 function decoyHash(): Promise<string> {
-  unknownEmailHash ??= hashPassword(randomBytes(32).toString("hex"));
-  return unknownEmailHash;
+  unknownLoginHash ??= hashPassword(randomBytes(32).toString("hex"));
+  return unknownLoginHash;
+}
+
+/**
+ * Where to go after signing in. Only a path on this origin is honoured, so a
+ * `?next=` somebody else put in a link cannot turn the sign-in form into a
+ * redirect to their own site. A protocol-relative `//host` is a URL to the
+ * browser, which is why the second character is checked too.
+ */
+function safeNext(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/portal";
+  if (/[\u0000-\u001f\s]/.test(raw)) return "/portal";
+  return raw;
 }
 
 export type BuyerLoginFormState = {
@@ -44,24 +56,26 @@ export async function logInBuyer(
   _prev: BuyerLoginFormState,
   formData: FormData
 ): Promise<BuyerLoginFormState> {
-  const email = (formData.get("email")?.toString() ?? "").trim().toLowerCase();
+  const login = (formData.get("login")?.toString() ?? "").trim();
   const password = formData.get("password")?.toString() ?? "";
+  const next = safeNext(formData.get("next")?.toString() ?? null);
 
-  if (!email || !password) {
-    return { status: "error", message: "Enter your email and password." };
+  if (!login || !password) {
+    return { status: "error", message: "Enter your user id or email, and your password." };
   }
   if (!sql) {
     return { status: "error", message: "Sign-in is unavailable right now." };
   }
 
-  const buyer = await findBuyerByEmail(email);
+  const buyer = await findBuyerByLogin(login);
 
-  // Same message — and the same amount of work — for "no such account" and
-  // "wrong password", so the form can't be used to enumerate which emails
-  // have buyer accounts.
-  const ok = await verifyPassword(password, buyer ? buyer.passwordHash : await decoyHash());
+  /* Same message — and the same amount of work — for "no such account",
+     "wrong password", and a company row the seller app created that has
+     never been given a login, so the form can't be used to find out which
+     of the three it was. */
+  const ok = await verifyPassword(password, buyer?.passwordHash ?? (await decoyHash()));
   if (!buyer || !ok) {
-    return { status: "error", message: "That email and password don't match an account." };
+    return { status: "error", message: "That login and password don't match an account." };
   }
 
   if (buyer.status !== "approved") {
@@ -69,12 +83,12 @@ export async function logInBuyer(
   }
 
   await startBuyerSession(buyer.buyerId);
-  await captureServerEvent(`buyer:${buyer.email}`, "buyer_logged_in", {
-    email_domain: emailDomain(buyer.email),
+  await captureServerEvent(`buyer:${buyer.email ?? buyer.username}`, "buyer_logged_in", {
+    email_domain: buyer.email ? emailDomain(buyer.email) : null,
   });
 
   revalidatePath("/", "layout");
-  redirect("/");
+  redirect(next);
 }
 
 export async function logOutBuyer(): Promise<void> {

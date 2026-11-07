@@ -234,6 +234,214 @@ test("accepts a buyer signup alongside email-less provider accounts", async () =
     VALUES ('zoe@trybutter.ai', 'hash', 'Zoe', ${interest.id})
   `;
 
-  const [{ count }] = await sql`SELECT count(*)::int AS count FROM buyers`;
+  /* Scoped to the address that signed up, because the migrations seed a
+     buyer of their own (Memories.ai) and this test is about the signup. */
+  const [{ count }] = await sql`
+    SELECT count(*)::int AS count FROM buyers WHERE lower(email) = 'zoe@trybutter.ai'
+  `;
   assert.equal(count, 1);
+});
+
+/**
+ * The buyer the seller app seeds and this app gives a login to. Both halves
+ * of the shared `buyers` row have to be there: the name the seller app
+ * points assignments at, and the user id and password the portal signs in.
+ */
+test("seeds the Memories.ai buyer with a user id it can sign in with", async () => {
+  await migrate();
+
+  const [buyer] = await sql`
+    SELECT name, username, status, password_hash AS "passwordHash"
+    FROM buyers WHERE lower(username) = 'memories_ai_admin'
+  `;
+
+  assert.equal(buyer.name, "Memories.ai");
+  assert.equal(buyer.status, "approved", "a status other than approved cannot sign in");
+  assert.match(buyer.passwordHash, /^scrypt\$[0-9a-f]+\$[0-9a-f]+$/);
+});
+
+/** An account signing in by user id has no address, so one can't be required. */
+test("allows a buyer with a user id and no email", async () => {
+  await migrate();
+
+  await sql`
+    INSERT INTO buyers (username, password_hash, name, status)
+    VALUES ('lab_admin', 'scrypt$aa$bb', 'Some Lab', 'approved')
+  `;
+
+  const [row] = await sql`SELECT email FROM buyers WHERE username = 'lab_admin'`;
+  assert.equal(row.email, null);
+});
+
+/** Two accounts may not differ only by the capitalisation of the user id. */
+test("refuses a second account with the same user id", async () => {
+  await migrate();
+
+  await sql`
+    INSERT INTO buyers (username, password_hash, name) VALUES ('dup', 'scrypt$aa$bb', 'First')
+  `;
+  await assert.rejects(
+    sql`INSERT INTO buyers (username, password_hash, name) VALUES ('DUP', 'scrypt$aa$bb', 'Second')`,
+    /duplicate key/
+  );
+});
+
+/**
+ * The buyer portal's own reads, against the seller app's tables.
+ *
+ * Written out rather than imported for the reason given above — `lib/footage.ts`
+ * pulls in `server-only`. They mirror that file; if the two drift, this test
+ * stops proving anything about the real query, so change both together.
+ */
+async function seedFootage() {
+  await createExternalTables();
+
+  const [buyer] = await sql`
+    SELECT id FROM buyers WHERE lower(username) = 'memories_ai_admin'
+  `;
+  const [other] = await sql`
+    INSERT INTO buyers (username, password_hash, name, status)
+    VALUES ('other_lab', 'scrypt$aa$bb', 'Other Lab', 'approved')
+    RETURNING id
+  `;
+  const [org] = await sql`INSERT INTO organizations (name) VALUES ('Crew') RETURNING id`;
+  const [site] = await sql`
+    INSERT INTO sites (org_id, site_code, description, site_category, city, country)
+    VALUES (${org.id}, 'FS-014', 'Bay 2 packing line', 'S26', 'Nairobi', 'KE')
+    RETURNING id
+  `;
+  const [mine] = await sql`
+    INSERT INTO assignments (org_id, buyer_id, site_id, task, spec, duration_minutes)
+    VALUES (${org.id}, ${buyer.id}, ${site.id}, 'Pack cartons', 'Two hands in frame', 12)
+    RETURNING id
+  `;
+  /* One for another buyer and one for nobody: neither may ever show up. */
+  const [theirs] = await sql`
+    INSERT INTO assignments (org_id, buyer_id, task) VALUES (${org.id}, ${other.id}, 'Theirs')
+    RETURNING id
+  `;
+  await sql`INSERT INTO assignments (org_id, task) VALUES (${org.id}, 'Self-initiated')`;
+
+  const [episode] = await sql`
+    INSERT INTO data_episodes (org_id, assignment_id, capture_id, recorded_at)
+    VALUES (${org.id}, ${mine.id}, 'EP-7K2M', now())
+    RETURNING id
+  `;
+  const [clean] = await sql`
+    INSERT INTO data_files
+      (org_id, episode_id, object_key, filename, size_bytes, content_type,
+       duration_seconds, modalities, scan_status)
+    VALUES (${org.id}, ${episode.id}, 'keys/video.mp4', 'video.mp4', 842000000,
+            'video/mp4', 750, ARRAY['video'], 'clean')
+    RETURNING id
+  `;
+  const [pending] = await sql`
+    INSERT INTO data_files
+      (org_id, episode_id, object_key, filename, size_bytes, content_type, scan_status)
+    VALUES (${org.id}, ${episode.id}, 'keys/motion.csv', 'motion.csv', 3100000,
+            'text/csv', 'pending')
+    RETURNING id
+  `;
+
+  return { buyerId: buyer.id, otherBuyerId: other.id, mine: mine.id, theirs: theirs.id, clean: clean.id, pending: pending.id };
+}
+
+/** Mirrors `listBuyerAssignments`. */
+function listAssignments(buyerId) {
+  return sql`
+    SELECT
+      a.id, a.task, a.spec, a.status,
+      a.duration_minutes AS "durationMinutes",
+      a.video, a.sound, a.location,
+      a.due_at AS "dueAt", a.created_at AS "createdAt",
+      s.site_code AS "siteCode", s.description AS "siteDescription",
+      s.site_category AS "siteCategory", s.address, s.city,
+      s.state_or_province AS "stateOrProvince", s.country,
+      s.business_legal_name AS "businessLegalName", s.headcount,
+      totals.episodes, totals.files, totals."durationSeconds", totals."sizeBytes"
+    FROM assignments a
+    LEFT JOIN sites s ON s.id = a.site_id
+    CROSS JOIN LATERAL (
+      SELECT
+        count(DISTINCT f.episode_id)::int AS episodes,
+        count(f.id)::int AS files,
+        COALESCE(sum(f.duration_seconds), 0)::int AS "durationSeconds",
+        COALESCE(sum(f.size_bytes), 0) AS "sizeBytes"
+      FROM data_files f
+      LEFT JOIN data_episodes e ON e.id = f.episode_id
+      WHERE COALESCE(e.assignment_id, f.assignment_id) = a.id
+    ) totals
+    WHERE a.buyer_id = ${buyerId}
+    ORDER BY a.created_at DESC, a.id DESC
+  `;
+}
+
+/** Mirrors `getBuyerFootageObject`. */
+function footageObject(buyerId, fileId) {
+  return sql`
+    SELECT f.object_key AS "objectKey", f.filename, f.content_type AS "contentType"
+    FROM data_files f
+    LEFT JOIN data_episodes e ON e.id = f.episode_id
+    JOIN assignments a ON a.id = COALESCE(e.assignment_id, f.assignment_id)
+    WHERE f.id = ${fileId} AND a.buyer_id = ${buyerId} AND f.scan_status = 'clean'
+    LIMIT 1
+  `;
+}
+
+test("lists a buyer's assignments with their site and footage totals", async () => {
+  await migrate();
+  const seeded = await seedFootage();
+
+  const rows = await listAssignments(seeded.buyerId);
+
+  assert.equal(rows.length, 1, "only the assignment collecting for this buyer");
+  const [row] = rows;
+  assert.equal(row.task, "Pack cartons");
+  assert.equal(row.siteCode, "FS-014");
+  assert.equal(row.siteCategory, "S26");
+  assert.equal(row.city, "Nairobi");
+  assert.equal(row.episodes, 1);
+  assert.equal(row.files, 2, "every file, whatever the sweep has said");
+  assert.equal(row.durationSeconds, 750);
+  assert.equal(Number(row.sizeBytes), 845100000);
+});
+
+/**
+ * An assignment with nothing recorded yet still has to be listed — it is how
+ * a buyer sees that work has been set up at all.
+ */
+test("lists an assignment with no footage against it", async () => {
+  await migrate();
+  const seeded = await seedFootage();
+
+  await sql`
+    INSERT INTO assignments (org_id, buyer_id, task)
+    SELECT org_id, ${seeded.buyerId}, 'Nothing yet' FROM assignments WHERE id = ${seeded.mine}
+  `;
+
+  const rows = await listAssignments(seeded.buyerId);
+  const empty = rows.find((r) => r.task === "Nothing yet");
+  assert.ok(empty, "an assignment with no episodes should still appear");
+  assert.equal(empty.episodes, 0);
+  assert.equal(empty.files, 0);
+  assert.equal(Number(empty.sizeBytes), 0);
+});
+
+test("hands out an object key only for a clean file on the buyer's own assignment", async () => {
+  await migrate();
+  const seeded = await seedFootage();
+
+  const [ok] = await footageObject(seeded.buyerId, seeded.clean);
+  assert.equal(ok.objectKey, "keys/video.mp4");
+
+  assert.equal(
+    (await footageObject(seeded.buyerId, seeded.pending)).length,
+    0,
+    "a file the malware sweep has not passed has no key to hand back"
+  );
+  assert.equal(
+    (await footageObject(seeded.otherBuyerId, seeded.clean)).length,
+    0,
+    "another buyer's footage is not theirs to read"
+  );
 });
