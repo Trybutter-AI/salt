@@ -1,9 +1,12 @@
 import "server-only";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { bucketFor, regionOfKey } from "./storage-target.mjs";
+
+type StorageRegion = "americas" | "emea";
 
 /**
- * Read access to the bucket the seller app uploads footage to.
+ * Read access to the buckets the seller app uploads footage to.
  *
  * The seller app owns writing: collectors upload browser-to-storage with a
  * presigned PUT and the recording is registered there. This app only ever
@@ -15,27 +18,34 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
  * what was collected is more use than one that fails to render.
  */
 
-const BUCKET = process.env.S3_BUCKET;
+/* Footage lives in one of two buckets, and the key says which: see
+   `storage-target.mjs`. Each client is made the first time its bucket is asked for. */
+const clients = new Map<StorageRegion, S3Client>();
 
-function createClient(): S3Client | null {
-  const region = process.env.S3_REGION;
-  const accessKeyId = process.env.S3_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
-  if (!BUCKET || !region || !accessKeyId || !secretAccessKey) return null;
-
-  const endpoint = process.env.S3_ENDPOINT;
-  return new S3Client({
-    region,
-    endpoint: endpoint || undefined,
-    forcePathStyle: Boolean(endpoint),
-    credentials: { accessKeyId, secretAccessKey },
-  });
+function clientFor(key: string): { client: S3Client; bucket: string } | null {
+  const config = bucketFor(key, process.env);
+  if (!config) return null;
+  const region = regionOfKey(key);
+  let client = clients.get(region);
+  if (!client) {
+    client = new S3Client({
+      region: config.region,
+      endpoint: config.endpoint,
+      forcePathStyle: Boolean(config.endpoint),
+      credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+    });
+    clients.set(region, client);
+  }
+  return { client, bucket: config.bucket };
 }
 
-const client = createClient();
-
-export function isStorageConfigured(): boolean {
-  return client !== null;
+/**
+ * Whether footage can be opened at all. With a key, whether that file's own
+ * bucket is set up: a recording kept in the EU bucket can't be opened while
+ * only the original bucket is configured.
+ */
+export function isStorageConfigured(key?: string): boolean {
+  return bucketFor(key ?? "", process.env) !== null;
 }
 
 /**
@@ -62,10 +72,12 @@ export async function createPresignedDownloadUrl(
   expiresIn = 900,
   options: { disposition?: "inline" | "attachment"; filename?: string; contentType?: string } = {}
 ): Promise<string> {
-  if (!client || !BUCKET) throw new Error("Storage not configured");
+  const target = clientFor(key);
+  if (!target) throw new Error(regionOfKey(key) === "emea" ? "EU storage not configured" : "Storage not configured");
+  const { client, bucket } = target;
 
   const command = new GetObjectCommand({
-    Bucket: BUCKET,
+    Bucket: bucket,
     Key: key,
     ResponseContentDisposition: contentDisposition(options.disposition ?? "inline", options.filename),
     ...(options.contentType ? { ResponseContentType: options.contentType } : {}),
