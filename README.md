@@ -88,3 +88,9 @@ seller app uploads to. A read-only key is enough; nothing here writes. Left
 blank, the portal still lists everything that was collected and the players
 and download links say footage can't be opened — which is what local
 development looks like.
+
+Footage recorded in Europe, Africa and the Middle East is kept in a second,
+EU bucket, read with the five `S3_EU_*` variables. A file whose key starts with
+`emea/` is read from there and every other file from the original bucket, the
+seller app's rule (`lib/storage-target.mjs`). With `S3_EU_*` blank, only those
+files say they can't be opened.

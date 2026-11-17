@@ -47,7 +47,8 @@ export async function GET(
     return NextResponse.json({ error: "No such file." }, { status: 404, headers: NO_STORE });
   }
 
-  if (!isStorageConfigured()) {
+  /* The file's own bucket: a recording kept in the EU bucket needs that one set up. */
+  if (!isStorageConfigured(file.objectKey)) {
     return NextResponse.json(
       { error: "Footage can't be opened right now." },
       { status: 503, headers: NO_STORE }
