@@ -3,7 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import BuyerLoginForm from "../components/BuyerLoginForm";
 import { verifyBuyerSession } from "../../lib/buyer-auth";
-import { loginUrl } from "../../lib/urls";
+import { localPath, loginUrl } from "../../lib/urls";
 
 export const metadata: Metadata = {
   title: "Buyer log in",
@@ -24,7 +24,7 @@ export default async function MarketplaceLoginPage({
   searchParams: Promise<{ next?: string }>;
 }) {
   const { next } = await searchParams;
-  const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/portal";
+  const safeNext = localPath(next, "/portal");
 
   if (await verifyBuyerSession()) redirect(safeNext);
 

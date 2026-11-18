@@ -13,6 +13,9 @@ import {
 } from "../../lib/buyer-auth";
 import { emailDomain } from "../../lib/auth/kyb";
 import { captureServerEvent } from "../../lib/posthog-server";
+import { localPath } from "../../lib/urls";
+import { clientAddress, loginAllowed, loginFailed, loginSucceeded } from "../../lib/auth/login-limit.mjs";
+import { headers } from "next/headers";
 
 /**
  * A hash of a random string, verified against when what was typed matches no
@@ -26,17 +29,8 @@ function decoyHash(): Promise<string> {
   return unknownLoginHash;
 }
 
-/**
- * Where to go after signing in. Only a path on this origin is honoured, so a
- * `?next=` somebody else put in a link cannot turn the sign-in form into a
- * redirect to their own site. A protocol-relative `//host` is a URL to the
- * browser, which is why the second character is checked too.
- */
-function safeNext(raw: string | null): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/portal";
-  if (/[\u0000-\u001f\s]/.test(raw)) return "/portal";
-  return raw;
-}
+/** Signup takes no more than this, so nothing longer can be a real password. */
+const MAX_PASSWORD_LENGTH = 200;
 
 export type BuyerLoginFormState = {
   status: "idle" | "error";
@@ -58,13 +52,30 @@ export async function logInBuyer(
 ): Promise<BuyerLoginFormState> {
   const login = (formData.get("login")?.toString() ?? "").trim();
   const password = formData.get("password")?.toString() ?? "";
-  const next = safeNext(formData.get("next")?.toString() ?? null);
+  /* Only a path on this origin, so a `?next=` somebody else put in a link
+     cannot turn the sign-in form into a redirect to their own site. */
+  const next = localPath(formData.get("next")?.toString(), "/portal");
 
   if (!login || !password) {
     return { status: "error", message: "Enter your user id or email, and your password." };
   }
   if (!sql) {
     return { status: "error", message: "Sign-in is unavailable right now." };
+  }
+
+  /* Before any hashing: a long run of guesses, or one enormous "password",
+     would otherwise cost a scrypt each. */
+  const from = clientAddress(await headers());
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return { status: "error", message: "That login and password don't match an account." };
+  }
+  const wait = loginAllowed(login, from);
+  if (wait !== null) {
+    const minutes = Math.max(1, Math.ceil(wait / 60));
+    return {
+      status: "error",
+      message: `Too many tries. Wait ${minutes} minute${minutes === 1 ? "" : "s"} and try again.`,
+    };
   }
 
   const buyer = await findBuyerByLogin(login);
@@ -75,8 +86,10 @@ export async function logInBuyer(
      of the three it was. */
   const ok = await verifyPassword(password, buyer?.passwordHash ?? (await decoyHash()));
   if (!buyer || !ok) {
+    loginFailed(login, from);
     return { status: "error", message: "That login and password don't match an account." };
   }
+  loginSucceeded(login);
 
   if (buyer.status !== "approved") {
     return { status: "error", message: STATUS_BLOCKED[buyer.status] };
